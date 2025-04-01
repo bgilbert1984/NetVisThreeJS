@@ -33,6 +33,6 @@
     "concurrently": "^8.2.2",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.2",
-    "vite": "^5.1.6"
+    "vite": "^6.2.4"
   }
 }
