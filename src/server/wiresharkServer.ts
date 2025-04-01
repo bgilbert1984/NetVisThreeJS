@@ -173,6 +173,8 @@ class TestTrafficGenerator {
     '172.16.0.1', '8.8.8.8', '1.1.1.1'
   ];
   private protocols = ['TCP', 'UDP', 'HTTP', 'HTTPS', 'DNS'];
+  private connectionAttempts = 0;
+  private maxRetries = 5;
   
   constructor() {
     this.aggregator = new NetworkTrafficAggregator();
@@ -182,12 +184,46 @@ class TestTrafficGenerator {
     if (this.running) return;
     this.running = true;
     
+    // Reset connection attempts
+    this.connectionAttempts = 0;
+    
+    console.log('Starting test traffic generator with enhanced reliability');
+    
     // Generate traffic every 500ms
     this.interval = setInterval(() => {
-      const packet = this.generateRandomPacket();
-      const visualizationData = this.aggregator.addPacket(packet);
-      io.emit('networkUpdate', visualizationData);
+      try {
+        if (io.engine && io.engine.clientsCount > 0) {
+          const packet = this.generateRandomPacket();
+          const visualizationData = this.aggregator.addPacket(packet);
+          io.emit('networkUpdate', visualizationData);
+        } else {
+          console.log('No clients connected, waiting for connections...');
+          this.connectionAttempts++;
+          
+          if (this.connectionAttempts > this.maxRetries) {
+            console.log(`Exceeded max retry attempts (${this.maxRetries}). Pausing traffic generation.`);
+            this.pause();
+          }
+        }
+      } catch (error) {
+        console.error('Error generating test traffic:', error);
+        // Don't stop completely on error, just log it
+      }
     }, 500);
+  }
+
+  pause() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  }
+
+  resume(io: Server) {
+    if (this.running && !this.interval) {
+      this.connectionAttempts = 0;
+      this.start(io);
+    }
   }
 
   stop() {
@@ -198,6 +234,9 @@ class TestTrafficGenerator {
       clearInterval(this.interval);
       this.interval = null;
     }
+    
+    // Reset the aggregator to clear data
+    this.aggregator = new NetworkTrafficAggregator();
   }
 
   private generateRandomPacket(): PacketData {

@@ -217,7 +217,7 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
 
   const connectToServer = useCallback(() => {
     if (reconnectAttempts.current >= maxReconnectAttempts) {
-      setError('Failed to connect to server after multiple attempts');
+      setError(`Failed to connect to server after ${maxReconnectAttempts} attempts. Make sure the server is running with 'npm run start:server'`);
       return;
     }
 
@@ -226,12 +226,15 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
         socketRef.current.disconnect();
       }
 
+      console.log(`Attempting to connect to ${serverUrl}... (Attempt ${reconnectAttempts.current + 1}/${maxReconnectAttempts})`);
+
       socketRef.current = io(serverUrl, {
         transports: ['websocket', 'polling'],
         reconnection: true,
         reconnectionAttempts: 5,
         reconnectionDelay: 1000,
-        timeout: 10000
+        timeout: 20000, // Increased timeout
+        forceNew: true // Force a new connection each time
       });
 
       socketRef.current.on('connect', () => {
@@ -244,14 +247,19 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
 
       socketRef.current.on('connect_error', (err) => {
         console.error('Connection error:', err);
-        setError(`Connection error: ${err.message}`);
+        setError(`Connection error: ${err.message}. Make sure the server is running with 'npm run start:server'`);
         reconnectAttempts.current++;
         setIsConnected(false);
+        
+        // Schedule retry with exponential backoff
+        const retryDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts.current), 10000);
+        console.log(`Will retry in ${retryDelay}ms`);
+        setTimeout(() => connectToServer(), retryDelay);
       });
 
       socketRef.current.on('error', (err) => {
         console.error('Socket error:', err);
-        setError(`Server error: ${err.message}`);
+        setError(`Server error: ${err.message || 'Unknown error'}`);
       });
 
       socketRef.current.on('networkUpdate', (newData: WiresharkData) => {
@@ -261,17 +269,22 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
       socketRef.current.on('disconnect', (reason) => {
         console.log('Disconnected from server:', reason);
         setIsConnected(false);
-        if (reason === 'io server disconnect') {
-          // Server initiated disconnect, try to reconnect
-          setTimeout(() => connectToServer(), 1000);
+        
+        // For all disconnection reasons except explicit client disconnects, try to reconnect
+        if (reason !== 'io client disconnect') {
+          const reconnectDelay = 1500;
+          console.log(`Attempting to reconnect in ${reconnectDelay}ms...`);
+          setTimeout(() => connectToServer(), reconnectDelay);
         }
       });
 
     } catch (err) {
       console.error('Failed to initialize socket:', err);
-      setError('Failed to initialize connection');
+      setError(`Failed to initialize connection: ${err instanceof Error ? err.message : 'Unknown error'}`);
       reconnectAttempts.current++;
-      setTimeout(() => connectToServer(), 2000);
+      
+      const retryDelay = Math.min(1000 * Math.pow(1.5, reconnectAttempts.current), 10000);
+      setTimeout(() => connectToServer(), retryDelay);
     }
   }, [serverUrl, networkInterface]);
 
