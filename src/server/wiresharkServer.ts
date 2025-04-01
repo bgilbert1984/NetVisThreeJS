@@ -3,7 +3,6 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { spawn } from 'child_process';
 import cors from 'cors';
-import { Transform } from 'stream';
 import { WiresharkData, NetworkHost, NetworkStream } from '../types/wireshark';
 
 const app = express();
@@ -16,13 +15,14 @@ const io = new Server(httpServer, {
     methods: ["GET", "POST"],
     credentials: true
   },
-  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000,
   transports: ['websocket', 'polling']
 });
 
-// Add basic health check endpoint
+// Add health check endpoint
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
+  res.json({ status: 'ok' });
 });
 
 interface PacketData {
@@ -116,11 +116,24 @@ class NetworkTrafficAggregator {
 const startCapture = (networkInterface: string = 'any') => {
   const aggregator = new NetworkTrafficAggregator();
   
-  const tshark = spawn('tshark', [
+  // Use sudo to run tshark with elevated privileges
+  const tshark = spawn('sudo', [
+    'tshark',
     '-i', networkInterface,
     '-T', 'json',
-    '-l'
+    '-l',
+    '-f', 'ip'  // Filter for IP packets only
   ]);
+
+  tshark.stderr.on('data', (data) => {
+    const errorMsg = data.toString();
+    console.error('tshark error:', errorMsg);
+    if (errorMsg.includes('Permission denied')) {
+      io.emit('error', { 
+        message: 'Permission denied. Please run the server with sudo privileges.'
+      });
+    }
+  });
 
   let buffer = '';
   tshark.stdout.on('data', (data) => {
@@ -133,43 +146,182 @@ const startCapture = (networkInterface: string = 'any') => {
       buffer = '';
     } catch (e) {
       // Incomplete JSON, continue buffering
+      if (buffer.length > 1000000) { // Reset if buffer gets too large
+        buffer = '';
+      }
     }
+  });
+
+  tshark.on('error', (error) => {
+    console.error('Failed to start tshark:', error);
+    io.emit('error', { 
+      message: 'Failed to start packet capture. Check permissions and tshark installation.'
+    });
   });
 
   return tshark;
 };
 
+// Mock data generator for test traffic
+class TestTrafficGenerator {
+  private running = false;
+  private interval: NodeJS.Timeout | null = null;
+  private aggregator: NetworkTrafficAggregator;
+  private ips = [
+    '192.168.1.1', '192.168.1.2', '192.168.1.100', 
+    '10.0.0.1', '10.0.0.2', '10.0.0.3',
+    '172.16.0.1', '8.8.8.8', '1.1.1.1'
+  ];
+  private protocols = ['TCP', 'UDP', 'HTTP', 'HTTPS', 'DNS'];
+  
+  constructor() {
+    this.aggregator = new NetworkTrafficAggregator();
+  }
+
+  start(io: Server) {
+    if (this.running) return;
+    this.running = true;
+    
+    // Generate traffic every 500ms
+    this.interval = setInterval(() => {
+      const packet = this.generateRandomPacket();
+      const visualizationData = this.aggregator.addPacket(packet);
+      io.emit('networkUpdate', visualizationData);
+    }, 500);
+  }
+
+  stop() {
+    if (!this.running) return;
+    this.running = false;
+    
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  }
+
+  private generateRandomPacket(): PacketData {
+    const srcIpIndex = Math.floor(Math.random() * this.ips.length);
+    let dstIpIndex = Math.floor(Math.random() * this.ips.length);
+    
+    // Ensure source and destination are different
+    while (dstIpIndex === srcIpIndex) {
+      dstIpIndex = Math.floor(Math.random() * this.ips.length);
+    }
+    
+    const protocolIndex = Math.floor(Math.random() * this.protocols.length);
+    const protocol = this.protocols[protocolIndex];
+    const bytes = Math.floor(Math.random() * 1500) + 50; // Random packet size between 50 and 1550 bytes
+    
+    let tcpData;
+    let udpData;
+    
+    if (protocol === 'TCP' || protocol === 'HTTP' || protocol === 'HTTPS') {
+      const srcPort = (Math.floor(Math.random() * 60000) + 1024).toString();
+      let dstPort = (Math.floor(Math.random() * 60000) + 1024).toString();
+      
+      // Set appropriate destination ports for HTTP/HTTPS
+      if (protocol === 'HTTP') {
+        dstPort = '80';
+      } else if (protocol === 'HTTPS') {
+        dstPort = '443';
+      }
+      
+      tcpData = { 
+        "tcp.srcport": srcPort,
+        "tcp.dstport": dstPort
+      };
+    } else if (protocol === 'UDP' || protocol === 'DNS') {
+      const srcPort = (Math.floor(Math.random() * 60000) + 1024).toString();
+      let dstPort = (Math.floor(Math.random() * 60000) + 1024).toString();
+      
+      // Set appropriate destination port for DNS
+      if (protocol === 'DNS') {
+        dstPort = '53';
+      }
+      
+      udpData = {
+        "udp.srcport": srcPort,
+        "udp.dstport": dstPort
+      };
+    }
+    
+    return {
+      _source: {
+        layers: {
+          frame: { 
+            "frame.time_epoch": (Date.now() / 1000).toString()
+          },
+          ip: {
+            "ip.src": this.ips[srcIpIndex],
+            "ip.dst": this.ips[dstIpIndex],
+            "ip.proto": protocol === 'TCP' || protocol === 'HTTP' || protocol === 'HTTPS' ? '6' : 
+                        protocol === 'UDP' || protocol === 'DNS' ? '17' : '1',
+            "ip.len": bytes.toString()
+          },
+          tcp: tcpData,
+          udp: udpData
+        }
+      }
+    };
+  }
+}
+
+// Create test traffic generator
+const testTrafficGenerator = new TestTrafficGenerator();
+
 io.on('connection', (socket) => {
   console.log('Client connected');
+  let capture: ReturnType<typeof startCapture> | null = null;
   
+  socket.on('startCapture', (networkInterface: string) => {
+    console.log('Starting capture on interface:', networkInterface);
+    try {
+      if (networkInterface === 'test') {
+        console.log('Starting test traffic generator');
+        testTrafficGenerator.start(io);
+      } else {
+        capture = startCapture(networkInterface);
+      }
+    } catch (err) {
+      console.error('Failed to start capture:', err);
+      socket.emit('error', { message: 'Failed to start capture' });
+    }
+  });
+
+  socket.on('stopTestTraffic', () => {
+    console.log('Stopping test traffic generator');
+    testTrafficGenerator.stop();
+  });
+
   socket.on('error', (error) => {
     console.error('Socket error:', error);
   });
   
-  socket.on('startCapture', (networkInterface: string) => {
-    console.log(`Starting capture on interface: ${networkInterface}`);
-    try {
-      const capture = startCapture(networkInterface);
-      
-      capture.on('error', (error) => {
-        console.error('Capture error:', error);
-        socket.emit('error', { message: 'Capture failed' });
-      });
-      
-      socket.on('disconnect', () => {
-        capture.kill();
-        console.log('Client disconnected, stopping capture');
-      });
-    } catch (error) {
-      console.error('Failed to start capture:', error);
-      socket.emit('error', { message: 'Failed to start capture' });
+  socket.on('disconnect', () => {
+    console.log('Client disconnected');
+    if (capture) {
+      capture.kill();
+      console.log('Capture stopped');
     }
+    
+    // Also stop test traffic generator if running
+    testTrafficGenerator.stop();
   });
 });
 
-const PORT = process.env.PORT || 3001;
+const cleanup = () => {
+  console.log('Cleaning up...');
+  io.close();
+  httpServer.close();
+  process.exit(0);
+};
+
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
+process.on('exit', cleanup);
+
+const PORT = process.env.PORT || 3002;
 httpServer.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-}).on('error', (error) => {
-  console.error('Server failed to start:', error);
 });

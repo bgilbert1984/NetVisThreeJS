@@ -4,6 +4,7 @@ import { OrbitControls, Html } from '@react-three/drei';
 import * as THREE from 'three';
 import { io, Socket } from 'socket.io-client';
 import { WiresharkData, NetworkHost, NetworkStream } from '../types/wireshark';
+import TestTrafficControls from './TestTrafficControls';
 
 interface NetworkVisualizationProps {
   serverUrl?: string;
@@ -200,7 +201,7 @@ const NetworkGraph: React.FC<{ data: WiresharkData }> = ({ data }) => {
 }
 
 export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({ 
-  serverUrl = 'http://localhost:3001',
+  serverUrl = 'http://localhost:3002',
   interface: networkInterface = 'any',
   initialData,
   width = '100%', 
@@ -209,6 +210,7 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
   const [data, setData] = useState<WiresharkData>(initialData || { hosts: [], streams: [] });
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [isTestTrafficRunning, setIsTestTrafficRunning] = useState(false);
   const socketRef = useRef<Socket>();
   const reconnectAttempts = useRef(0);
   const maxReconnectAttempts = 5;
@@ -220,11 +222,16 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
     }
 
     try {
+      if (socketRef.current?.connected) {
+        socketRef.current.disconnect();
+      }
+
       socketRef.current = io(serverUrl, {
         transports: ['websocket', 'polling'],
-        reconnectionAttempts: 3,
+        reconnection: true,
+        reconnectionAttempts: 5,
         reconnectionDelay: 1000,
-        timeout: 5000
+        timeout: 10000
       });
 
       socketRef.current.on('connect', () => {
@@ -239,6 +246,7 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
         console.error('Connection error:', err);
         setError(`Connection error: ${err.message}`);
         reconnectAttempts.current++;
+        setIsConnected(false);
       });
 
       socketRef.current.on('error', (err) => {
@@ -250,14 +258,20 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
         setData(newData);
       });
 
-      socketRef.current.on('disconnect', () => {
-        console.log('Disconnected from server');
+      socketRef.current.on('disconnect', (reason) => {
+        console.log('Disconnected from server:', reason);
         setIsConnected(false);
+        if (reason === 'io server disconnect') {
+          // Server initiated disconnect, try to reconnect
+          setTimeout(() => connectToServer(), 1000);
+        }
       });
+
     } catch (err) {
       console.error('Failed to initialize socket:', err);
       setError('Failed to initialize connection');
       reconnectAttempts.current++;
+      setTimeout(() => connectToServer(), 2000);
     }
   }, [serverUrl, networkInterface]);
 
@@ -271,6 +285,30 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
     };
   }, [connectToServer]);
 
+  const handleStartTestTraffic = () => {
+    if (socketRef.current?.connected) {
+      // Disconnect from real traffic if connected
+      socketRef.current.emit('stopTestTraffic');
+      
+      // Start test traffic
+      socketRef.current.emit('startCapture', 'test');
+      setIsTestTrafficRunning(true);
+    }
+  };
+
+  const handleStopTestTraffic = () => {
+    if (socketRef.current?.connected) {
+      socketRef.current.emit('stopTestTraffic');
+      setIsTestTrafficRunning(false);
+      
+      // Reset visualization data
+      setData({ hosts: [], streams: [] });
+      
+      // Reconnect to real traffic if needed
+      socketRef.current.emit('startCapture', networkInterface);
+    }
+  };
+
   return (
     <div style={{ width, height, position: 'relative' }}>
       <Canvas camera={{ position: [0, 20, 20], fov: 75 }}>
@@ -280,6 +318,8 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
         <NetworkGraph data={data} />
         <OrbitControls />
       </Canvas>
+      
+      {/* Connection status indicators */}
       {error && (
         <div style={{
           position: 'absolute',
@@ -289,7 +329,8 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
           color: 'white',
           padding: '8px 16px',
           borderRadius: '4px',
-          fontSize: '14px'
+          fontSize: '14px',
+          zIndex: 1000
         }}>
           {error}
         </div>
@@ -303,11 +344,40 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
           color: 'white',
           padding: '8px 16px',
           borderRadius: '4px',
-          fontSize: '14px'
+          fontSize: '14px',
+          zIndex: 1000
         }}>
           Connecting to server...
         </div>
       )}
+      
+      {/* Test Traffic Controls */}
+      <TestTrafficControls 
+        onStartTest={handleStartTestTraffic}
+        onStopTest={handleStopTestTraffic}
+        isRunning={isTestTrafficRunning}
+      />
+      
+      {/* Network Stats Display */}
+      <div style={{
+        position: 'absolute',
+        top: 16,
+        right: 16,
+        background: 'rgba(0, 0, 0, 0.8)',
+        color: 'white',
+        padding: '8px 16px',
+        borderRadius: '4px',
+        fontSize: '14px',
+        zIndex: 1000
+      }}>
+        <div>Hosts: {data.hosts.length}</div>
+        <div>Connections: {data.streams.length}</div>
+        {isTestTrafficRunning && (
+          <div style={{ color: '#ffcc00' }}>
+            Using test traffic
+          </div>
+        )}
+      </div>
     </div>
   );
 }
