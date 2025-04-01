@@ -211,7 +211,7 @@ export const NetworkVisualization: React.FC<NetworkVisualizationProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isTestTrafficRunning, setIsTestTrafficRunning] = useState(false);
-  const socketRef = useRef<Socket>();
+  const socketRef = useRef<Socket | undefined>(undefined);
   const reconnectAttempts = useRef(0);
   const maxReconnectAttempts = 5;
 

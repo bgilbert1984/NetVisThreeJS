@@ -351,16 +351,60 @@ io.on('connection', (socket) => {
 
 const cleanup = () => {
   console.log('Cleaning up...');
-  io.close();
-  httpServer.close();
-  process.exit(0);
+  // Close connections gracefully
+  io.close(() => {
+    httpServer.close(() => {
+      console.log('Server shut down successfully');
+      // Only exit if explicitly requested via SIGINT or SIGTERM
+    });
+  });
 };
 
-process.on('SIGINT', cleanup);
-process.on('SIGTERM', cleanup);
-process.on('exit', cleanup);
+// Handle termination signals
+process.on('SIGINT', () => {
+  console.log('Received SIGINT signal');
+  cleanup();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('Received SIGTERM signal');
+  cleanup();
+  process.exit(0);
+});
+
+// Add uncaught exception handler for better stability
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  
+  // Handle port already in use errors specially
+  if (error.code === 'EADDRINUSE') {
+    console.log(`Port ${PORT} is already in use. This could be another instance of the server.`);
+    console.log('You can either:');
+    console.log(`1. Use the existing server instance on port ${PORT}`);
+    console.log('2. Stop the existing server and try again');
+    console.log('3. Change the PORT environment variable to use a different port');
+    
+    // Exit with a special code for port in use
+    process.exit(2);
+  }
+  
+  // Don't exit immediately on other uncaught exceptions
+  // This allows the server to keep running despite errors
+});
 
 const PORT = process.env.PORT || 3002;
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+
+// Try to start the server with graceful error handling
+const startServer = () => {
+  try {
+    httpServer.listen(PORT, () => {
+      console.log(`Server running on port ${PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    // Error handling will be caught by uncaughtException handler
+  }
+};
+
+startServer();
